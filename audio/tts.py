@@ -1,156 +1,189 @@
-import io
-import queue
-import re
+import asyncio
+import os
+import random
+import tempfile
 import threading
-import time
-import wave
+from pathlib import Path
 
+import edge_tts
 import numpy as np
 import pygame
-import torch
 
-LATIN_TO_CYRILLIC = {
-    "jarvis": "джарвис", "windows": "виндовс", "cpu": "процессор", "ram": "память",
-    "gpu": "видеокарта", "python": "пайтон", "github": "гитхаб", "chrome": "хром",
-    "telegram": "телеграм", "whatsapp": "ватсап", "youtube": "ютуб", "steam": "стим",
-    "discord": "дискорд", "wi-fi": "вайфай", "wifi": "вайфай", "ip": "айпи", "ok": "окей",
-}
-
-DIGITS_MAP = {
-    "0": "ноль", "1": "один", "2": "два", "3": "три", "4": "четыре",
-    "5": "пять", "6": "шесть", "7": "семь", "8": "восемь", "9": "девять",
-}
-
-
-def normalize_for_silero(text: str) -> str:
-    res = text.lower().replace("%", " процентов ")
-    for eng, rus in LATIN_TO_CYRILLIC.items():
-        res = re.sub(rf"\b{re.escape(eng)}\b", rus, res)
-
-    latin_chars = {
-        "a": "а", "b": "б", "c": "к", "d": "д", "e": "е", "f": "ф", "g": "г",
-        "h": "х", "i": "и", "j": "дж", "k": "к", "l": "л", "m": "м", "n": "н",
-        "o": "о", "p": "п", "q": "к", "r": "р", "s": "с", "t": "т", "u": "у",
-        "v": "в", "w": "в", "x": "кс", "y": "й", "z": "з",
-    }
-    out = []
-    for ch in res:
-        if ch in DIGITS_MAP:
-            out.append(f" {DIGITS_MAP[ch]} ")
-        elif ch in latin_chars:
-            out.append(latin_chars[ch])
-        else:
-            out.append(ch)
-
-    cleaned = re.sub(r"\s+", " ", "".join(out)).strip()
-    if not re.search(r"[а-яё]", cleaned):
-        return "Готово."
-    return cleaned
+from config.settings import DATA_DIR
 
 
 class TextToSpeech:
-    def __init__(self, use_intercom_effect: bool = False, speaker: str = "eugene"):
+    def __init__(
+        self,
+        use_intercom_effect: bool = True,
+        speaker: str = "eugene",
+        voice: str = "ru-RU-DmitryNeural",
+        rate: str = "+6%",
+        pitch: str = "-6Hz",
+    ):
+        self.use_intercom_effect = use_intercom_effect
         self.speaker = speaker
-        self.sample_rate = 48000
-        self._current_sound = None
+        self.voice = voice
+        self.rate = rate
+        self.pitch = pitch
+        self._lock = threading.Lock()
+        self._stop_requested = False
 
-        print(f"[TTS] Загрузка нейросети голоса (спикер: {self.speaker})...")
+        # Папка для оригинальных фраз Джарвиса из фильма (по желанию)
+        self.sounds_dir = DATA_DIR / "jarvis_sounds"
+        self.sounds_dir.mkdir(parents=True, exist_ok=True)
+
+        # Карта быстрых фраз -> файлов в data/jarvis_sounds/
+        self.phrase_samples = {
+            "да, сэр?": ["yes_sir.wav", "yes_sir.mp3", "at_your_service.wav"],
+            "да, слушаю?": ["yes_sir.wav", "yes_sir.mp3"],
+            "к вашим услугам, сэр.": ["at_your_service.wav", "at_your_service.mp3"],
+        }
+
         try:
-            self.model, _ = torch.hub.load(
-                repo_or_dir="snakers4/silero-models",
-                model="silero_tts",
-                language="ru",
-                speaker="v5_ru",
-            )
-        except Exception:
-            self.model, _ = torch.hub.load(
-                repo_or_dir="snakers4/silero-models",
-                model="silero_tts",
-                language="ru",
-                speaker="v4_ru",
-            )
-        self.model.to(torch.device("cpu"))
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(frequency=24000, size=-16, channels=1, buffer=512)
+        except Exception as e:
+            print(f"[TTS] Ошибка инициализации аудиомикшера: {e}")
 
-        # Прогрев словаря ударений
-        _ = self.model.apply_tts(
-            text="Система готова.",
-            speaker=self.speaker,
-            sample_rate=self.sample_rate,
-            put_accent=True,
-            put_yo=True,
+    def _find_original_sample(self, text: str) -> Path | None:
+        key = text.strip().lower()
+        candidates = self.phrase_samples.get(key, [])
+        existing = [self.sounds_dir / f for f in candidates if (self.sounds_dir / f).exists()]
+        if existing:
+            return random.choice(existing)
+        return None
+
+    async def _synthesize_edge(self, text: str, out_path: str):
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=self.voice,
+            rate=self.rate,
+            pitch=self.pitch,
         )
+        await communicate.save(out_path)
 
-        pygame.mixer.init(frequency=self.sample_rate, size=-16, channels=1)
+    @staticmethod
+    def _apply_jarvis_helmet_filter(input_mp3: str, output_wav: str) -> bool:
+        """Накладывает фирменный эффект интеркома шлема Тони Старка."""
+        try:
+            import av
+            import soundfile as sf
+            from scipy.signal import butter, lfilter
 
-        self._queue: queue.Queue[str] = queue.Queue()
-        self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
-        self._worker_thread.start()
-        print(f"[TTS] In-Memory аудиодвижок ({self.speaker}) готов.")
+            container = av.open(input_mp3)
+            resampler = av.AudioResampler(format="s16", layout="mono", rate=24000)
+            chunks = []
+            for frame in container.decode(audio=0):
+                frame.pts = None
+                resampled = resampler.resample(frame)
+                if resampled:
+                    frames = resampled if isinstance(resampled, list) else [resampled]
+                    for rf in frames:
+                        chunks.append(np.frombuffer(bytes(rf.planes[0]), dtype=np.int16))
+            container.close()
 
-    def is_speaking(self) -> bool:
-        return pygame.mixer.get_init() is not None and pygame.mixer.get_busy()
+            if not chunks:
+                return False
 
-    def stop(self):
-        while not self._queue.empty():
-            try:
-                self._queue.get_nowait()
-                self._queue.task_done()
-            except queue.Empty:
-                break
+            audio = np.concatenate(chunks).astype(np.float32) / 32768.0
+            sr = 24000
 
-        if self.is_speaking():
-            pygame.mixer.stop()
+            # 1. Полосной фильтр (срезаем глухие низы < 180 Гц и резкие верха > 7500 Гц)
+            b, a = butter(2, [180 / (sr / 2), 7500 / (sr / 2)], btype="band")
+            filtered = lfilter(b, a, audio)
 
-    def speak(self, text: str, blocking: bool = False):
-        if not text or not text.strip():
+            # 2. Легкая микро-задержка (эффект акустики внутри шлема ~12 мс)
+            delay_samples = int(0.012 * sr)
+            delayed = np.zeros_like(filtered)
+            delayed[delay_samples:] = filtered[:-delay_samples]
+            processed = filtered * 0.82 + delayed * 0.22
+
+            # 3. Мягкая компрессия и нормализация
+            processed = np.tanh(processed * 1.25)
+            max_val = np.max(np.abs(processed))
+            if max_val > 0:
+                processed = processed / max_val * 0.92
+
+            sf.write(output_wav, processed, sr, subtype="PCM_16")
+            return True
+        except Exception:
+            return False
+
+    def speak(self, text: str, blocking: bool = True):
+        clean_text = (text or "").strip()
+        if not clean_text:
             return
 
-        self.stop()
-        self._queue.put(text.strip())
+        print(f"🔹 [ДЖАРВИС]: {clean_text}")
 
         if blocking:
-            self._queue.join()
+            self._speak_worker(clean_text)
+        else:
+            threading.Thread(target=self._speak_worker, args=(clean_text,), daemon=True).start()
 
-    def _tensor_to_wav_bytes(self, audio_tensor: torch.Tensor) -> io.BytesIO:
-        """Конвертирует аудио-тензор в WAV-буфер прямо в оперативной памяти (без записи на диск)."""
-        audio_np = audio_tensor.numpy()
-        pcm_int16 = np.clip(audio_np * 32767.0, -32768, 32767).astype(np.int16)
+    def _speak_worker(self, text: str):
+        with self._lock:
+            self._stop_requested = False
 
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)  # 16 бит = 2 байта
-            wf.setframerate(self.sample_rate)
-            wf.writeframes(pcm_int16.tobytes())
-        buf.seek(0)
-        return buf
+            # 1. Проверяем, есть ли оригинальный сэмпл из фильма для этой фразы
+            sample_path = self._find_original_sample(text)
+            if sample_path is not None:
+                self._play_file(str(sample_path))
+                return
 
-    def _worker_loop(self):
-        while True:
-            text = self._queue.get()
+            # 2. Генерируем голос Джарвиса через Edge-TTS + фильтр шлема
+            tmp_mp3 = None
+            tmp_wav = None
             try:
-                t0 = time.perf_counter()
-                norm_text = normalize_for_silero(text)
+                fd_mp3, tmp_mp3 = tempfile.mkstemp(suffix=".mp3")
+                os.close(fd_mp3)
 
-                audio_tensor = self.model.apply_tts(
-                    text=norm_text,
-                    speaker=self.speaker,
-                    sample_rate=self.sample_rate,
-                    put_accent=True,
-                    put_yo=True,
-                )
+                asyncio.run(self._synthesize_edge(text, tmp_mp3))
 
-                wav_buffer = self._tensor_to_wav_bytes(audio_tensor)
-                synth_sec = time.perf_counter() - t0
-                print(f"[Тайминг TTS] Синтез в ОЗУ занял: {synth_sec:.2f} сек.")
+                if self._stop_requested:
+                    return
 
-                sound = pygame.mixer.Sound(file=wav_buffer)
-                self._current_sound = sound
-                channel = sound.play()
-                while channel is not None and channel.get_busy():
-                    time.sleep(0.03)
+                play_target = tmp_mp3
+                if self.use_intercom_effect:
+                    fd_wav, tmp_wav = tempfile.mkstemp(suffix=".wav")
+                    os.close(fd_wav)
+                    if self._apply_jarvis_helmet_filter(tmp_mp3, tmp_wav):
+                        play_target = tmp_wav
+
+                self._play_file(play_target)
 
             except Exception as e:
-                print(f"[TTS] Ошибка синтеза/воспроизведения: {e}")
+                print(f"[TTS] Ошибка синтеза речи: {e}")
             finally:
-                self._queue.task_done()
+                for p in (tmp_mp3, tmp_wav):
+                    if p and os.path.exists(p):
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
+
+    def _play_file(self, file_path: str):
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+            pygame.mixer.music.load(file_path)
+            pygame.mixer.music.play()
+            clock = pygame.time.Clock()
+            while pygame.mixer.music.get_busy():
+                if self._stop_requested:
+                    pygame.mixer.music.stop()
+                    break
+                clock.tick(20)
+            pygame.mixer.music.unload()
+        except Exception as e:
+            print(f"[TTS] Ошибка воспроизведения: {e}")
+
+    def stop(self):
+        self._stop_requested = True
+        try:
+            if pygame.mixer.get_init() and pygame.mixer.music.get_busy():
+                pygame.mixer.music.stop()
+                pygame.mixer.music.unload()
+        except Exception:
+            pass
