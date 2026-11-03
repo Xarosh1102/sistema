@@ -9,9 +9,11 @@ if str(BASE_DIR) not in sys.path:
 
 
 def _setup_background_streams():
+    """Перенаправляет stdout/stderr в лог-файл при запуске через pythonw.exe."""
     logs_dir = BASE_DIR / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     bg_log_path = logs_dir / "background_console.log"
+
     if sys.stdout is None or sys.stderr is None:
         log_file = open(bg_log_path, "a", encoding="utf-8", buffering=1)
         sys.stdout = log_file
@@ -31,6 +33,7 @@ import ctypes
 import threading
 import winreg as reg
 
+from config.settings import LOGS_DIR
 from utils.logger import log
 from utils.autostart import create_silent_launchers
 from utils.tg_bot import run_telegram_bot
@@ -51,8 +54,9 @@ def _acquire_single_instance_mutex() -> bool:
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     is_restarting = "--restarting" in sys.argv
     attempts = 20 if is_restarting else 1
+
     for _ in range(attempts):
-        mutex = kernel32.CreateMutexW(None, False, "Local\\JarvisVoiceAssistantMutex")
+        mutex = kernel32.CreateMutexW(None, False, "Local\\SistemaVoiceAssistantMutex")
         last_err = ctypes.get_last_error()
         if last_err != 183:
             _APP_MUTEX = mutex
@@ -60,6 +64,7 @@ def _acquire_single_instance_mutex() -> bool:
         kernel32.CloseHandle(mutex)
         if is_restarting:
             time.sleep(0.3)
+
     return False
 
 
@@ -68,19 +73,18 @@ def _remove_duplicate_registry_autorun():
     try:
         with reg.OpenKey(reg.HKEY_CURRENT_USER, key_path, 0, reg.KEY_ALL_ACCESS) as key:
             reg.DeleteValue(key, "JarvisTelegramBot")
-            print("[Джарвис] Удален старый дубликат автозагрузки.")
+    except FileNotFoundError:
+        pass
     except Exception:
         pass
 
 
 def main():
-    global _APP_MUTEX
     if not _acquire_single_instance_mutex():
         print("[Джарвис] Ассистент уже запущен в фоне! Закрываю дубликат.")
         sys.exit(0)
 
     _remove_duplicate_registry_autorun()
-
     try:
         vbs_path = create_silent_launchers()
         print(f"[Джарвис] Фоновый лаунчер автозагрузки обновлен: {vbs_path}")
@@ -88,13 +92,22 @@ def main():
         log.warning(f"Не удалось обновить лаунчер автозагрузки: {e}")
 
     log.info("=== Запуск голосового ассистента «Джарвис» ===")
-    state = {"muted": False, "running": True}
+
+    state = {
+        "muted": False,
+        "running": True,
+    }
 
     memory = MemoryManager()
     agent = AgentCore(memory=memory, extra_tools=REGISTERED_TOOLS)
-    tts = TextToSpeech(use_intercom_effect=True, speaker="eugene")
+
+    # Включаем фирменный голос Джарвиса с DSP-эффектом шлема/интеркома
+    tts = TextToSpeech(use_intercom_effect=True)
     stt = SpeechToText()
+
+    # Строгий режим: всегда требует кодовое слово «Джарвис»
     wake_filter = WakeWordFilter(active_window_sec=0.0)
+
     listener = AudioListener(on_speech_start=lambda: tts.stop())
 
     tg_thread = threading.Thread(target=run_telegram_bot, args=(agent, stt), daemon=True)
@@ -124,8 +137,7 @@ def main():
     )
     tray.start_in_background()
 
-    print("[Джарвис] Все системы в норме. Скажи «Джарвис, ...» для команды.")
-    tts.speak("К вашим услугам, сэр.", blocking=False)
+    print("[Джарвис] К вашим услугам, сэр! Скажите «Джарвис, ...» для команды.")
 
     while state["running"]:
         if state["muted"]:
@@ -154,14 +166,14 @@ def main():
                 continue
 
             if not command:
-                tts.speak("Да, сэр?", blocking=True)
+                tts.speak("К вашим услугам, сэр.", blocking=True)
                 continue
 
             log.info(f"Команда пользователя: {command}")
             print(f"[Команда] Выполняю: {command}")
 
             answer = agent.process_command(command)
-            print(f"[Ответ] {answer}")
+            print(f"[Ответ Джарвиса] {answer}")
             log.info(f"Ответ Джарвиса: {answer}")
 
             tts.speak(answer, blocking=True)

@@ -1,5 +1,5 @@
 import queue
-import collections
+from collections import deque
 import numpy as np
 import sounddevice as sd
 import torch
@@ -9,20 +9,28 @@ from config.settings import (
     CHANNELS,
     CHUNK_SAMPLES,
     VAD_THRESHOLD,
+    SILENCE_LIMIT_SEC,
+    PRE_ROLL_SEC,
+    MAX_RECORD_SECONDS,
     MIN_SPEECH_RMS,
-    PRE_ROLL_MS,
-    SILENCE_TIMEOUT_MS,
-    MIN_SPEECH_MS,
-    MAX_SPEECH_SECONDS,
+    MIN_SPEECH_DURATION_SEC,
 )
 
 
 class AudioListener:
     def __init__(self, on_speech_start=None):
         self.on_speech_start = on_speech_start
-        self.audio_queue = queue.Queue()
+        self.sample_rate = SAMPLE_RATE
+        self.chunk_samples = CHUNK_SAMPLES
+        self.vad_threshold = VAD_THRESHOLD
+        self.silence_limit_sec = SILENCE_LIMIT_SEC
+        self.pre_roll_sec = PRE_ROLL_SEC
+        self.max_record_seconds = MAX_RECORD_SECONDS
+        self.min_speech_rms = MIN_SPEECH_RMS
+        self.min_speech_duration_sec = MIN_SPEECH_DURATION_SEC
 
-        print("[Audio] Загрузка модели Silero VAD...")
+        print("[VAD] Загрузка нейросетевого фильтра голоса Silero VAD...")
+        torch.set_num_threads(1)
         self.vad_model, _ = torch.hub.load(
             repo_or_dir="snakers4/silero-vad",
             model="silero_vad",
@@ -31,109 +39,98 @@ class AudioListener:
             trust_repo=True,
         )
         self.vad_model.eval()
+        print("[VAD] Модуль прослушивания готов!")
 
-        # Адаптивный уровень фонового шума комнаты
-        self.noise_floor = 0.0010
-
-    def _audio_callback(self, indata, frames, time_info, status):
-        if status:
-            pass
-        self.audio_queue.put(indata[:, 0].copy())
-
-    def _is_close_voice(self, chunk: np.ndarray, is_speaking: bool = False) -> tuple[bool, float]:
-        """
-        Проверяет, принадлежит ли звук голосу пользователя, а не фоновому телевизору.
-        Если речь уже началась (is_speaking=True), порог удерживания мягче, чтобы не терять окончания слов.
-        """
-        rms = float(np.sqrt(np.mean(np.square(chunk)) + 1e-12))
-        peak = float(np.max(np.abs(chunk)) + 1e-12)
-        crest_factor = peak / rms  # У живого близкого голоса выраженные пики, у далекого ТВ звук "плоский"
-
-        if not is_speaking:
-            # Плавное обновление уровня фонового шума в тишине
-            if rms < MIN_SPEECH_RMS * 1.2:
-                self.noise_floor = 0.95 * self.noise_floor + 0.05 * rms
-
-            # Для старта фразы голос должен быть выше минимального порога и заметно громче фона
-            min_required = max(MIN_SPEECH_RMS, self.noise_floor * 1.7)
-            return (rms >= min_required and crest_factor >= 1.8), rms
-        else:
-            # Когда ты уже говоришь, позволяем голосу становиться тише на концах слов
-            hold_rms = max(MIN_SPEECH_RMS * 0.45, self.noise_floor * 1.2)
-            return (rms >= hold_rms), rms
+    def _get_speech_prob(self, chunk: np.ndarray) -> float:
+        tensor_chunk = torch.from_numpy(chunk).float()
+        if tensor_chunk.ndim > 1:
+            tensor_chunk = tensor_chunk.squeeze()
+        with torch.no_grad():
+            prob = self.vad_model(tensor_chunk, self.sample_rate).item()
+        return float(prob)
 
     def listen_phrase(self) -> np.ndarray | None:
-        chunk_ms = (CHUNK_SAMPLES / SAMPLE_RATE) * 1000.0
-        pre_roll_chunks = max(1, int(PRE_ROLL_MS / chunk_ms))
-        silence_limit_chunks = max(1, int(SILENCE_TIMEOUT_MS / chunk_ms))
-        min_speech_chunks = max(1, int(MIN_SPEECH_MS / chunk_ms))
-        max_total_chunks = int((MAX_SPEECH_SECONDS * 1000.0) / chunk_ms)
+        """
+        Слушает микрофон с увеличенным буфером предзаписи (0.65 сек),
+        чтобы первый слог слова «Джарвис» никогда не обрезался.
+        """
+        audio_queue: queue.Queue[np.ndarray] = queue.Queue()
 
-        pre_roll_buffer = collections.deque(maxlen=pre_roll_chunks)
+        def audio_callback(indata, frames, time_info, status):
+            audio_queue.put(indata[:, 0].copy())
+
+        chunk_duration = self.chunk_samples / float(self.sample_rate)
+        pre_roll_maxlen = max(4, int(self.pre_roll_sec / chunk_duration))
+        pre_roll_buffer = deque(maxlen=pre_roll_maxlen)
+
         recorded_chunks = []
-
-        is_speaking = False
+        speech_started = False
+        silence_time = 0.0
+        total_record_time = 0.0
         speech_chunks_count = 0
-        silence_chunks_count = 0
-
-        # Очищаем очередь перед новым циклом прослушивания
-        while not self.audio_queue.empty():
-            try:
-                self.audio_queue.get_nowait()
-            except queue.Empty:
-                break
 
         self.vad_model.reset_states()
 
         with sd.InputStream(
-            samplerate=SAMPLE_RATE,
+            samplerate=self.sample_rate,
             channels=CHANNELS,
             dtype="float32",
-            blocksize=CHUNK_SAMPLES,
-            callback=self._audio_callback,
+            blocksize=self.chunk_samples,
+            callback=audio_callback,
         ):
             while True:
-                chunk = self.audio_queue.get()
+                try:
+                    chunk = audio_queue.get(timeout=1.0)
+                except queue.Empty:
+                    if speech_started:
+                        break
+                    continue
 
-                if len(chunk) < CHUNK_SAMPLES:
-                    chunk = np.pad(chunk, (0, CHUNK_SAMPLES - len(chunk)))
+                if len(chunk) != self.chunk_samples:
+                    continue
 
-                close_ok, _ = self._is_close_voice(chunk, is_speaking=is_speaking)
+                rms = float(np.sqrt(np.mean(chunk ** 2)))
+                prob = self._get_speech_prob(chunk)
+                is_speech = (prob >= self.vad_threshold) or (prob >= 0.25 and rms >= self.min_speech_rms * 1.5)
 
-                # Считаем вероятность речи через Silero VAD
-                tensor_chunk = torch.from_numpy(chunk)
-                with torch.no_grad():
-                    speech_prob = float(self.vad_model(tensor_chunk, SAMPLE_RATE).item())
-
-                # Для старта фразы нужен VAD >= VAD_THRESHOLD, для продолжения — мягче (0.7 от порога)
-                active_vad_threshold = VAD_THRESHOLD if not is_speaking else (VAD_THRESHOLD * 0.70)
-                is_voice_chunk = close_ok and (speech_prob >= active_vad_threshold)
-
-                if not is_speaking:
+                if not speech_started:
                     pre_roll_buffer.append(chunk)
-                    if is_voice_chunk:
-                        is_speaking = True
+                    if is_speech and rms >= self.min_speech_rms:
+                        speech_started = True
                         speech_chunks_count = 1
-                        silence_chunks_count = 0
+                        silence_time = 0.0
                         recorded_chunks.extend(pre_roll_buffer)
-                        if self.on_speech_start:
+                        total_record_time = len(recorded_chunks) * chunk_duration
+                        if callable(self.on_speech_start):
                             try:
                                 self.on_speech_start()
                             except Exception:
                                 pass
                 else:
                     recorded_chunks.append(chunk)
-                    if is_voice_chunk:
-                        speech_chunks_count += 1
-                        silence_chunks_count = 0
-                    else:
-                        silence_chunks_count += 1
+                    total_record_time += chunk_duration
 
-                    # Завершаем запись, если наступила пауза или превышен лимит времени
-                    if silence_chunks_count >= silence_limit_chunks or len(recorded_chunks) >= max_total_chunks:
+                    if is_speech:
+                        speech_chunks_count += 1
+                        silence_time = 0.0
+                    else:
+                        silence_time += chunk_duration
+
+                    if silence_time >= self.silence_limit_sec or total_record_time >= self.max_record_seconds:
                         break
 
-        if speech_chunks_count < min_speech_chunks:
+        if not recorded_chunks:
             return None
 
-        return np.concatenate(recorded_chunks, axis=0)
+        speech_duration = speech_chunks_count * chunk_duration
+        if speech_duration < self.min_speech_duration_sec:
+            return None
+
+        full_audio = np.concatenate(recorded_chunks).astype(np.float32)
+        overall_rms = float(np.sqrt(np.mean(full_audio ** 2)))
+        if overall_rms < self.min_speech_rms * 0.4:
+            return None
+
+        # Добавляем 0.2 сек тишины в начало и конец, чтобы Whisper не «съедал» первое слово «Джарвис»
+        pad = np.zeros(int(self.sample_rate * 0.20), dtype=np.float32)
+        return np.concatenate([pad, full_audio, pad])

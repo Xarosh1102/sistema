@@ -3,11 +3,14 @@ import threading
 from datetime import datetime
 from google import genai
 from google.genai import types
-from config.settings import LLM_API_KEY
+from config.settings import LLM_API_KEY, WAKE_WORDS
 from tools.os_system import (
     open_application,
     close_application,
     close_all_applications,
+    shutdown_computer,
+    reboot_computer,
+    cancel_shutdown,
     restart_assistant_system,
     adjust_system_volume,
     minimize_all_windows,
@@ -22,7 +25,7 @@ def create_memory_tools(memory):
         """Сохраняет важный факт о пользователе в долгосрочную память."""
         if memory:
             memory.save_fact(fact)
-            return f"Факт сохранен: {fact}"
+            return f"Запомнил, сэр: {fact}"
         return "Память не подключена."
 
     def clear_dialog_history() -> str:
@@ -39,11 +42,10 @@ class AgentCore:
     def __init__(self, memory=None, extra_tools=None):
         self.memory = memory
         self.client = genai.Client(api_key=LLM_API_KEY)
-        self.tools = []
 
+        self.tools = []
         if memory is not None:
             self.tools.extend(create_memory_tools(memory))
-
         if extra_tools:
             existing_names = {getattr(t, "__name__", str(t)) for t in self.tools}
             for tool_fn in extra_tools:
@@ -59,63 +61,105 @@ class AgentCore:
             "models/gemini-2.0-flash",
         ]
         self.active_model = self.model_candidates[0]
+
         threading.Thread(target=self._warmup_connection, daemon=True).start()
 
+    def _discover_models(self):
+        return self.model_candidates
+
     def _warmup_connection(self):
-        """Открывает соединение с серверами Google заранее при старте."""
+        """Прогревает соединение с серверами Google заранее при старте."""
         for model_name in self.model_candidates:
             try:
                 self.client.models.generate_content(
                     model=model_name,
-                    contents="ping",
-                    config=types.GenerateContentConfig(max_output_tokens=5),
+                    contents="ok",
+                    config=types.GenerateContentConfig(
+                        max_output_tokens=1,
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                    ),
                 )
                 self.active_model = model_name
-                print(f"[Джарвис] Соединение с ИИ прогрето ({model_name}).")
-                break
+                print(f"[Jarvis] Ядро ИИ прогрето ({model_name}) — готов к работе, сэр!")
+                return
             except Exception:
                 continue
 
-    def _build_system_instruction(self) -> str:
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-        facts_str = ""
-        if self.memory:
-            try:
-                facts = self.memory.get_all_facts()
-                if facts:
-                    facts_str = "\nИзвестные факты о пользователе:\n" + "\n".join(
-                        f"- {f}" for f in facts
-                    )
-            except Exception:
-                pass
-
-        return (
-            f"Ты — «Джарвис» (J.A.R.V.I.S.), сверхбыстрый голосовой и текстовый ИИ-ассистент "
-            f"в стиле оригинального Джарвиса Тони Старка для управления ПК на Windows. "
-            f"Текущее время: {now_str}. "
-            f"Общайся сдержанно, вежливо, с достоинством и легким интеллектуальным шармом, "
-            f"уместно обращаясь к пользователю «сэр». "
-            f"У тебя есть инструменты для открытия/закрытия любых программ (open_application, "
-            f"close_application, close_all_applications), перезапуска самого ассистента "
-            f"(restart_assistant_system), запуска макросов (run_macro), проверки расписания пар "
-            f"(get_schedule) и управления системой. "
-            f"Отвечай максимально кратко (1-2 предложения), четко, без символов разметки (* и #)."
-            f"{facts_str}"
-        )
+    @staticmethod
+    def _strip_wake_word(text: str) -> str:
+        cleaned = text.strip()
+        for w in list(WAKE_WORDS) + ["система"]:
+            pattern = rf"^\s*{re.escape(w)}[\s,!.:;-]+"
+            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
+        return cleaned if cleaned else text.strip()
 
     @staticmethod
     def _try_fast_local_command(cmd_text: str) -> str | None:
+        """
+        Мгновенно (за 0.01 сек без сетевого запроса к LLM) выполняет частые системные команды.
+        """
         low = cmd_text.lower().strip(" .,!?")
 
+        # 0. Отмена выключения или перезагрузки
         if any(
             p in low
             for p in (
-                "перезапусти джарвиса",
-                "перезагрузи джарвиса",
-                "обнови джарвиса",
+                "отмени выключение",
+                "отмени перезагрузку",
+                "отмена выключения",
+                "отмена перезагрузки",
+                "не выключай компьютер",
+                "не перезагружай компьютер",
+            )
+        ):
+            return cancel_shutdown()
+
+        # 1. Выключение компьютера (Windows)
+        if any(
+            p in low
+            for p in (
+                "выключи компьютер",
+                "выключить компьютер",
+                "выключи ноутбук",
+                "выключить ноутбук",
+                "выключи ноут",
+                "выруби компьютер",
+                "выруби ноутбук",
+                "выруби ноут",
+                "выключи пк",
+                "заверши работу",
+                "завершение работы",
+            )
+        ):
+            return shutdown_computer()
+
+        # 2. Перезагрузка компьютера (Windows)
+        if any(
+            p in low
+            for p in (
+                "перезапусти компьютер",
+                "перезапустить компьютер",
+                "перезагрузи компьютер",
+                "перезагрузить компьютер",
+                "перезапусти ноутбук",
+                "перезагрузи ноутбук",
+                "перезапусти ноут",
+                "перезагрузи ноут",
+                "перезапусти пк",
+                "перезагрузи пк",
+            )
+        ):
+            return reboot_computer()
+
+        # 3. Перезапуск самого ассистента Джарвиса
+        if any(
+            p in low
+            for p in (
                 "перезапуск системы",
                 "перезапусти систему",
                 "перезагрузи систему",
+                "перезапуск джарвиса",
+                "перезапусти джарвиса",
                 "перезапусти себя",
                 "перезапусти бота",
                 "перезапусти ассистента",
@@ -126,18 +170,13 @@ class AgentCore:
         ):
             return restart_assistant_system()
 
-        if any(
-            p in low
-            for p in ("режим кодинга", "запусти кодинг", "сценарий кодинга", "за работу")
-        ):
+        # 4. Макросы
+        if any(p in low for p in ("режим кодинга", "запусти кодинг", "сценарий кодинга", "за работу")):
             return run_macro("режим кодинга")
-
-        if any(
-            p in low
-            for p in ("отдыхаем", "режим отдыха", "время отдыха", "запусти отдых")
-        ):
+        if any(p in low for p in ("отдыхаем", "режим отдыха", "время отдыха", "запусти отдых")):
             return run_macro("отдыхаем")
 
+        # 5. Закрытие ВСЕХ приложений
         if any(
             p in low
             for p in (
@@ -151,10 +190,13 @@ class AgentCore:
         ):
             return close_all_applications()
 
+        # 6. Сворачивание всех окон
         if any(
             p in low
             for p in (
                 "сверни все окна",
+                "свернуть все окна",
+                "сверни окна",
                 "сверни всё",
                 "сверни все",
                 "чистый стол",
@@ -163,122 +205,151 @@ class AgentCore:
         ):
             return minimize_all_windows()
 
-        if any(
-            p in low
-            for p in (
-                "заблокируй компьютер",
-                "заблокируй пк",
-                "заблокируй экран",
-                "блок пк",
-            )
-        ):
+        # 7. Блокировка экрана
+        if any(p in low for p in ("заблокируй компьютер", "заблокируй пк", "заблокируй экран", "блок пк")):
             return lock_workstation()
 
+        # 8. Быстрая установка громкости («громкость на 50», «звук 25»)
         m_vol = re.search(r"(?:громкость|звук)\s*(?:на)?\s*(\d{1,3})", low)
         if m_vol:
             return adjust_system_volume(int(m_vol.group(1)))
 
+        # 9. Быстрое закрытие конкретного приложения («закрой телеграм», «закрой приложение телеграм»)
         m_close = re.match(r"^(?:закрой|закрыть|заверши|выключи|убей)\s+(.+)$", low)
         if m_close:
             target = m_close.group(1).strip()
-            if target not in ("все", "всё", "все окна", "все программы", "все приложения"):
+            if not any(x in target for x in ("вкладк", "компьютер", "ноутбук", "ноут", "пк", "систему")):
                 return close_application(target)
 
+        # 10. Быстрое открытие приложения во весь экран («открой ватсап», «запусти телеграм»)
         m_open = re.match(r"^(?:открой|открыть|запусти|запустить|включи)\s+(.+)$", low)
         if m_open:
             target = m_open.group(1).strip()
-            return open_application(target)
+            if not any(x in target for x in ("сайт", "файл", "папку", "вкладк", "http", ".ru", ".com", ".kz", ".bz")):
+                return open_application(target)
 
+        # 11. Быстрая проверка расписания
         if any(
             p in low
-            for p in ("расписание", "какие пары", "какие сегодня пары", "пары на завтра")
+            for p in ("какая сейчас пара", "что сейчас по парам", "какие пары завтра", "какие пары сегодня", "расписание")
         ):
-            day = "завтра" if "завтра" in low else "сегодня"
-            return get_schedule(day)
+            if "завтра" in low:
+                return get_schedule("завтра")
+            elif "сейчас" in low:
+                return get_schedule("сейчас")
+            return get_schedule("сегодня")
 
         return None
 
-    def process_command(self, user_text: str) -> str:
-        clean_input = (user_text or "").strip()
-        if not clean_input:
-            return "Я вас слушаю, сэр."
-
-        # 1. Мгновенный локальный перехват без задержек API
-        fast_result = self._try_fast_local_command(clean_input)
-        if fast_result is not None:
-            if self.memory:
-                self.memory.add_message("user", clean_input)
-                self.memory.add_message("model", fast_result)
-            return fast_result
-
-        # 2. Запрос к Gemini с Function Calling
-        contents = []
+    def _build_system_instruction(self) -> str:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        facts_str = ""
         if self.memory:
-            for msg in self.memory.get_recent_messages(limit=8):
-                role = "user" if msg["role"] == "user" else "model"
-                contents.append(
-                    types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])])
-                )
-        contents.append(
-            types.Content(role="user", parts=[types.Part.from_text(text=clean_input)])
+            try:
+                facts = self.memory.get_all_facts()
+                if facts:
+                    facts_str = "\nИзвестные факты о пользователе:\n" + "\n".join(f"- {f}" for f in facts)
+            except Exception:
+                pass
+
+        return (
+            f"Ты — Джарвис (J.A.R.V.I.S.), высокоинтеллектуальный голосовой и текстовый ИИ-ассистент в стиле Джарвиса Тони Старка. "
+            f"Текущее время: {now_str}. "
+            f"Обращайся к пользователю уважительно («сэр»), держи спокойный, уверенный и безупречно вежливый тон. "
+            f"У тебя есть инструменты для выключения ПК (shutdown_computer), перезагрузки ПК (reboot_computer), отмены выключения (cancel_shutdown), "
+            f"сворачивания всех окон (minimize_all_windows), открытия и закрытия программ (open_application, close_application, close_all_applications), "
+            f"перезапуска самой системы Джарвиса (restart_assistant_system), запуска макросов (run_macro) и проверки расписания пар (get_schedule). "
+            f"Отвечай максимально кратко (1-2 предложения), четко и без символов разметки (* и #)."
+            f"{facts_str}"
         )
 
-        tool_map = {getattr(t, "__name__", str(t)): t for t in self.tools}
+    def process_command(self, user_text: str) -> str:
+        if not user_text or not user_text.strip():
+            return "Я не расслышал команду, сэр."
 
-        for model_name in self.model_candidates:
+        clean_text = self._strip_wake_word(user_text)
+
+        fast_result = self._try_fast_local_command(clean_text)
+        if fast_result is not None:
+            if self.memory:
+                try:
+                    self.memory.add_message("user", clean_text)
+                    self.memory.add_message("model", fast_result)
+                except Exception:
+                    pass
+            return fast_result
+
+        history_contents = []
+        if self.memory:
             try:
-                local_contents = list(contents)
-                for _ in range(5):
-                    response = self.client.models.generate_content(
-                        model=model_name,
-                        contents=local_contents,
-                        config=types.GenerateContentConfig(
-                            system_instruction=self._build_system_instruction(),
-                            tools=self.tools if self.tools else None,
-                            temperature=0.3,
-                        ),
-                    )
+                recent = self.memory.get_recent_messages(limit=4)
+                for msg in recent:
+                    role = "user" if msg.get("role") == "user" else "model"
+                    content_text = msg.get("content", "")
+                    if content_text:
+                        history_contents.append(
+                            types.Content(role=role, parts=[types.Part.from_text(text=content_text)])
+                        )
+            except Exception:
+                pass
 
-                    if response.function_calls:
-                        local_contents.append(response.candidates[0].content)
-                        for fn_call in response.function_calls:
-                            fn_name = fn_call.name
-                            fn_args = dict(fn_call.args) if fn_call.args else {}
-                            print(f"[Инструмент] Вызов {fn_name}({fn_args})")
-                            if fn_name in tool_map:
-                                try:
-                                    res_val = tool_map[fn_name](**fn_args)
-                                except Exception as tool_err:
-                                    res_val = f"Ошибка выполнения {fn_name}: {tool_err}"
-                            else:
-                                res_val = f"Инструмент {fn_name} не найден."
+        history_contents.append(
+            types.Content(role="user", parts=[types.Part.from_text(text=clean_text)])
+        )
 
-                            local_contents.append(
-                                types.Content(
-                                    role="tool",
-                                    parts=[
-                                        types.Part.from_function_response(
-                                            name=fn_name,
-                                            response={"result": str(res_val)},
-                                        )
-                                    ],
-                                )
-                            )
-                        continue
+        models_to_try = [self.active_model] + [m for m in self.model_candidates if m != self.active_model]
+        last_error = None
 
-                    reply = (response.text or "Выполнено, сэр.").strip()
-                    break
-                else:
-                    reply = "Превышен лимит вызовов инструментов, сэр."
+        for model_name in models_to_try:
+            try:
+                config = types.GenerateContentConfig(
+                    system_instruction=self._build_system_instruction(),
+                    temperature=0.25,
+                    max_output_tokens=250,
+                    tools=self.tools if self.tools else None,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                )
 
-                reply = reply.replace("*", "").replace("#", "")
+                response = self.client.models.generate_content(
+                    model=model_name,
+                    contents=history_contents,
+                    config=config,
+                )
+
+                self.active_model = model_name
+                reply = (response.text or "Выполнено, сэр.").replace("*", "").replace("#", "").strip()
+
                 if self.memory:
-                    self.memory.add_message("user", clean_input)
-                    self.memory.add_message("model", reply)
+                    try:
+                        self.memory.add_message("user", clean_text)
+                        self.memory.add_message("model", reply)
+                    except Exception:
+                        pass
+
                 return reply
 
             except Exception as e:
-                print(f"[AgentCore] Ошибка на модели {model_name}: {e}")
-                continue
+                last_error = e
+                try:
+                    fallback_config = types.GenerateContentConfig(
+                        system_instruction=self._build_system_instruction(),
+                        temperature=0.25,
+                        max_output_tokens=250,
+                        tools=self.tools if self.tools else None,
+                    )
+                    response = self.client.models.generate_content(
+                        model=model_name,
+                        contents=history_contents,
+                        config=fallback_config,
+                    )
+                    self.active_model = model_name
+                    reply = (response.text or "Выполнено, сэр.").replace("*", "").replace("#", "").strip()
+                    if self.memory:
+                        self.memory.add_message("user", clean_text)
+                        self.memory.add_message("model", reply)
+                    return reply
+                except Exception as inner_e:
+                    last_error = inner_e
+                    continue
 
-        return "Прошу прощения, сэр, возникла временная ошибка связи с сервером."
+        return f"Сэр, возникла ошибка при обработке запроса: {last_error}"

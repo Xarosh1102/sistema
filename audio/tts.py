@@ -1,44 +1,39 @@
-import asyncio
 import os
-import random
-import tempfile
+import re
+import hashlib
+import asyncio
 import threading
 from pathlib import Path
 
-import edge_tts
 import numpy as np
 import pygame
+import soundfile as sf
+from scipy import signal
+import edge_tts
 
-from config.settings import DATA_DIR
+from config.settings import (
+    DATA_DIR,
+    TTS_VOICE,
+    TTS_RATE,
+    TTS_PITCH,
+    USE_INTERCOM_EFFECT,
+)
+
+JARVIS_SOUNDS_DIR = DATA_DIR / "jarvis_sounds"
+JARVIS_CACHE_DIR = DATA_DIR / "jarvis_cache"
 
 
 class TextToSpeech:
-    def __init__(
-        self,
-        use_intercom_effect: bool = True,
-        speaker: str = "eugene",
-        voice: str = "ru-RU-DmitryNeural",
-        rate: str = "+6%",
-        pitch: str = "-6Hz",
-    ):
+    def __init__(self, use_intercom_effect: bool = USE_INTERCOM_EFFECT, speaker: str = "dmitry"):
         self.use_intercom_effect = use_intercom_effect
-        self.speaker = speaker
-        self.voice = voice
-        self.rate = rate
-        self.pitch = pitch
+        self.voice = TTS_VOICE
+        self.rate = TTS_RATE
+        self.pitch = TTS_PITCH
         self._lock = threading.Lock()
         self._stop_requested = False
 
-        # Папка для оригинальных фраз Джарвиса из фильма (по желанию)
-        self.sounds_dir = DATA_DIR / "jarvis_sounds"
-        self.sounds_dir.mkdir(parents=True, exist_ok=True)
-
-        # Карта быстрых фраз -> файлов в data/jarvis_sounds/
-        self.phrase_samples = {
-            "да, сэр?": ["yes_sir.wav", "yes_sir.mp3", "at_your_service.wav"],
-            "да, слушаю?": ["yes_sir.wav", "yes_sir.mp3"],
-            "к вашим услугам, сэр.": ["at_your_service.wav", "at_your_service.mp3"],
-        }
+        JARVIS_SOUNDS_DIR.mkdir(parents=True, exist_ok=True)
+        JARVIS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
         try:
             if not pygame.mixer.get_init():
@@ -46,144 +41,167 @@ class TextToSpeech:
         except Exception as e:
             print(f"[TTS] Ошибка инициализации аудиомикшера: {e}")
 
-    def _find_original_sample(self, text: str) -> Path | None:
-        key = text.strip().lower()
-        candidates = self.phrase_samples.get(key, [])
-        existing = [self.sounds_dir / f for f in candidates if (self.sounds_dir / f).exists()]
-        if existing:
-            return random.choice(existing)
-        return None
+        # В фоне прогреваем коронные фразы Джарвиса для мгновенного отклика
+        threading.Thread(target=self._warmup_jarvis_phrases, daemon=True).start()
 
-    async def _synthesize_edge(self, text: str, out_path: str):
+    def _warmup_jarvis_phrases(self):
+        phrases = [
+            "К вашим услугам, сэр.",
+            "Да, сэр?",
+            "Всегда к вашим услугам, сэр.",
+            "Выполнено, сэр.",
+            "Как прикажете, сэр.",
+        ]
+        for p in phrases:
+            try:
+                self._get_or_create_cached_audio(p)
+            except Exception:
+                pass
+        print("[TTS] Голосовой модуль Джарвиса (DSP Intercom) готов к работе!")
+
+    @staticmethod
+    def _clean_text_for_speech(text: str) -> str:
+        if not text:
+            return ""
+        cleaned = re.sub(r"[*#`_~>|]", "", text)
+        cleaned = re.sub(r"https?://\S+", "ссылка", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
+    def _apply_jarvis_dsp(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """
+        Создает фирменный тембр Джарвиса из фильма «Железный человек»:
+        фильтрация частот, двойной фазовый микро-дилей (эффект голограммы/шлема) и мягкая сатурация.
+        """
+        if audio.ndim > 1:
+            audio = np.mean(audio, axis=1)
+        audio = audio.astype(np.float32)
+
+        # 1. Полосовой фильтр (убираем глухой низ ниже 85 Гц и резкий песок выше 7800 Гц)
+        nyq = 0.5 * sr
+        low = max(0.001, min(85.0 / nyq, 0.99))
+        high = max(low + 0.01, min(7800.0 / nyq, 0.99))
+        b, a = signal.butter(2, [low, high], btype="band")
+        filtered = signal.lfilter(b, a, audio)
+
+        # 2. Легкий подъем презенса (2.5 кГц) для четкости дикции
+        b_peak, a_peak = signal.iirpeak(min(2500.0 / nyq, 0.95), Q=2.5)
+        presence = signal.lfilter(b_peak, a_peak, filtered)
+        sculpted = filtered * 0.82 + presence * 0.18
+
+        # 3. Двойная пространственная микро-задержка (14 мс и 27 мс) — узнаваемый металлический оттенок Джарвиса
+        d1 = int(sr * 0.014)
+        d2 = int(sr * 0.027)
+        delayed1 = np.zeros_like(sculpted)
+        delayed2 = np.zeros_like(sculpted)
+        if len(sculpted) > d2:
+            delayed1[d1:] = sculpted[:-d1]
+            delayed2[d2:] = sculpted[:-d2]
+
+        mixed = sculpted * 0.78 + delayed1 * 0.15 + delayed2 * 0.07
+
+        # 4. Мягкая компрессия и нормализация громкости
+        compressed = np.tanh(mixed * 1.35)
+        max_val = float(np.max(np.abs(compressed)))
+        if max_val > 1e-5:
+            compressed = (compressed / max_val) * 0.92
+
+        return compressed.astype(np.float32)
+
+    async def _synthesize_edge_async(self, text: str, raw_mp3_path: Path):
         communicate = edge_tts.Communicate(
             text=text,
             voice=self.voice,
             rate=self.rate,
             pitch=self.pitch,
         )
-        await communicate.save(out_path)
+        await communicate.save(str(raw_mp3_path))
 
-    @staticmethod
-    def _apply_jarvis_helmet_filter(input_mp3: str, output_wav: str) -> bool:
-        """Накладывает фирменный эффект интеркома шлема Тони Старка."""
+    def _find_original_movie_sample(self, clean_text: str) -> Path | None:
+        """Если в папке data/jarvis_sounds лежат оригинальные сэмплы из фильма, возвращает их."""
+        low = clean_text.lower().strip(" .,!?")
+        mapping = {
+            "да, сэр": ["yes_sir.wav", "yes_sir.mp3"],
+            "да сэр": ["yes_sir.wav", "yes_sir.mp3"],
+            "к вашим услугам, сэр": ["at_your_service.wav", "at_your_service.mp3"],
+            "к вашим услугам сэр": ["at_your_service.wav", "at_your_service.mp3"],
+            "всегда к вашим услугам, сэр": ["at_your_service.wav", "at_your_service.mp3"],
+        }
+        for key, filenames in mapping.items():
+            if low == key:
+                for fname in filenames:
+                    candidate = JARVIS_SOUNDS_DIR / fname
+                    if candidate.exists():
+                        return candidate
+        return None
+
+    def _get_or_create_cached_audio(self, clean_text: str) -> Path | None:
+        orig_sample = self._find_original_movie_sample(clean_text)
+        if orig_sample is not None:
+            return orig_sample
+
+        text_hash = hashlib.md5(
+            f"{clean_text}_{self.voice}_{self.rate}_{self.pitch}_{self.use_intercom_effect}".encode("utf-8")
+        ).hexdigest()[:16]
+
+        final_wav = JARVIS_CACHE_DIR / f"jarvis_{text_hash}.wav"
+        if final_wav.exists():
+            return final_wav
+
+        temp_mp3 = JARVIS_CACHE_DIR / f"temp_{text_hash}.mp3"
         try:
-            import av
-            import soundfile as sf
-            from scipy.signal import butter, lfilter
+            asyncio.run(self._synthesize_edge_async(clean_text, temp_mp3))
+            if not temp_mp3.exists():
+                return None
 
-            container = av.open(input_mp3)
-            resampler = av.AudioResampler(format="s16", layout="mono", rate=24000)
-            chunks = []
-            for frame in container.decode(audio=0):
-                frame.pts = None
-                resampled = resampler.resample(frame)
-                if resampled:
-                    frames = resampled if isinstance(resampled, list) else [resampled]
-                    for rf in frames:
-                        chunks.append(np.frombuffer(bytes(rf.planes[0]), dtype=np.int16))
-            container.close()
+            data, sr = sf.read(str(temp_mp3), dtype="float32")
+            if self.use_intercom_effect:
+                data = self._apply_jarvis_dsp(data, sr)
 
-            if not chunks:
-                return False
-
-            audio = np.concatenate(chunks).astype(np.float32) / 32768.0
-            sr = 24000
-
-            # 1. Полосной фильтр (срезаем глухие низы < 180 Гц и резкие верха > 7500 Гц)
-            b, a = butter(2, [180 / (sr / 2), 7500 / (sr / 2)], btype="band")
-            filtered = lfilter(b, a, audio)
-
-            # 2. Легкая микро-задержка (эффект акустики внутри шлема ~12 мс)
-            delay_samples = int(0.012 * sr)
-            delayed = np.zeros_like(filtered)
-            delayed[delay_samples:] = filtered[:-delay_samples]
-            processed = filtered * 0.82 + delayed * 0.22
-
-            # 3. Мягкая компрессия и нормализация
-            processed = np.tanh(processed * 1.25)
-            max_val = np.max(np.abs(processed))
-            if max_val > 0:
-                processed = processed / max_val * 0.92
-
-            sf.write(output_wav, processed, sr, subtype="PCM_16")
-            return True
-        except Exception:
-            return False
+            sf.write(str(final_wav), data, sr, subtype="PCM_16")
+            return final_wav
+        except Exception as e:
+            print(f"[TTS] Ошибка синтеза речи Джарвиса: {e}")
+            return temp_mp3 if temp_mp3.exists() else None
+        finally:
+            if temp_mp3.exists() and final_wav.exists():
+                temp_mp3.unlink(missing_ok=True)
 
     def speak(self, text: str, blocking: bool = True):
-        clean_text = (text or "").strip()
+        clean_text = self._clean_text_for_speech(text)
         if not clean_text:
             return
 
-        print(f"🔹 [ДЖАРВИС]: {clean_text}")
+        self._stop_requested = False
 
-        if blocking:
-            self._speak_worker(clean_text)
-        else:
-            threading.Thread(target=self._speak_worker, args=(clean_text,), daemon=True).start()
-
-    def _speak_worker(self, text: str):
-        with self._lock:
-            self._stop_requested = False
-
-            # 1. Проверяем, есть ли оригинальный сэмпл из фильма для этой фразы
-            sample_path = self._find_original_sample(text)
-            if sample_path is not None:
-                self._play_file(str(sample_path))
-                return
-
-            # 2. Генерируем голос Джарвиса через Edge-TTS + фильтр шлема
-            tmp_mp3 = None
-            tmp_wav = None
-            try:
-                fd_mp3, tmp_mp3 = tempfile.mkstemp(suffix=".mp3")
-                os.close(fd_mp3)
-
-                asyncio.run(self._synthesize_edge(text, tmp_mp3))
-
+        def _play_task():
+            with self._lock:
                 if self._stop_requested:
                     return
+                audio_path = self._get_or_create_cached_audio(clean_text)
+                if not audio_path or not audio_path.exists() or self._stop_requested:
+                    return
 
-                play_target = tmp_mp3
-                if self.use_intercom_effect:
-                    fd_wav, tmp_wav = tempfile.mkstemp(suffix=".wav")
-                    os.close(fd_wav)
-                    if self._apply_jarvis_helmet_filter(tmp_mp3, tmp_wav):
-                        play_target = tmp_wav
+                try:
+                    pygame.mixer.music.load(str(audio_path))
+                    pygame.mixer.music.play()
+                    while pygame.mixer.music.get_busy():
+                        if self._stop_requested:
+                            pygame.mixer.music.stop()
+                            break
+                        pygame.time.Clock().tick(30)
+                except Exception as e:
+                    print(f"[TTS] Ошибка воспроизведения: {e}")
 
-                self._play_file(play_target)
-
-            except Exception as e:
-                print(f"[TTS] Ошибка синтеза речи: {e}")
-            finally:
-                for p in (tmp_mp3, tmp_wav):
-                    if p and os.path.exists(p):
-                        try:
-                            os.remove(p)
-                        except Exception:
-                            pass
-
-    def _play_file(self, file_path: str):
-        try:
-            if not pygame.mixer.get_init():
-                pygame.mixer.init()
-            pygame.mixer.music.load(file_path)
-            pygame.mixer.music.play()
-            clock = pygame.time.Clock()
-            while pygame.mixer.music.get_busy():
-                if self._stop_requested:
-                    pygame.mixer.music.stop()
-                    break
-                clock.tick(20)
-            pygame.mixer.music.unload()
-        except Exception as e:
-            print(f"[TTS] Ошибка воспроизведения: {e}")
+        if blocking:
+            _play_task()
+        else:
+            threading.Thread(target=_play_task, daemon=True).start()
 
     def stop(self):
         self._stop_requested = True
         try:
             if pygame.mixer.get_init() and pygame.mixer.music.get_busy():
                 pygame.mixer.music.stop()
-                pygame.mixer.music.unload()
         except Exception:
             pass

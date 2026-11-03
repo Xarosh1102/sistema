@@ -1,52 +1,64 @@
 import re
 import time
-from typing import Tuple
-
-from config.settings import WAKE_WORDS
-
-STOP_COMMANDS = ("стоп", "тихо", "замолчи", "хватит", "отмена", "пауза")
+from difflib import SequenceMatcher
+from config.settings import WAKE_WORDS, STOP_WORDS
 
 
 class WakeWordFilter:
     def __init__(self, active_window_sec: float = 0.0):
-        """
-        active_window_sec=0.0 означает СТРОГИЙ режим: ассистент срабатывает ТОЛЬКО при наличии слова 'Система'.
-        Любые разговоры в комнате или звук из телевизора без слова 'Система' игнорируются на 100%.
-        """
         self.active_window_sec = active_window_sec
-        self.last_interaction_time: float = 0.0
+        self.last_active_time = 0.0
 
     def keep_alive(self):
-        self.last_interaction_time = time.time()
+        if self.active_window_sec > 0:
+            self.last_active_time = time.time()
 
-    def reset_session(self):
-        self.last_interaction_time = 0.0
-
-    def is_session_active(self) -> bool:
-        if self.active_window_sec <= 0:
+    @staticmethod
+    def _is_fuzzy_jarvis(word: str) -> bool:
+        """Проверяет, похоже ли слово по звучанию на «Джарвис» или «Jarvis»."""
+        w = re.sub(r"[^а-яёa-z]", "", word.lower())
+        if len(w) < 4:
             return False
-        return (time.time() - self.last_interaction_time) <= self.active_window_sec
+        for target in ("джарвис", "жарвис", "jarvis"):
+            if SequenceMatcher(None, w, target).ratio() >= 0.62:
+                return True
+        return False
 
-    def extract_command(self, raw_text: str) -> Tuple[bool, str, bool]:
+    def extract_command(self, raw_text: str) -> tuple[bool, str, bool]:
+        """
+        Проверяет наличие слова «Джарвис» (точно или по фонетическому сходству) или стоп-слов.
+        Возвращает кортеж: (нужно_ли_выполнять, текст_команды, это_стоп_команда).
+        """
         if not raw_text:
             return False, "", False
 
         clean = raw_text.strip()
-        lower = clean.lower()
+        low = clean.lower().strip(" .,!?-")
 
-        clean_words = re.sub(r"[^\w\s]", "", lower).split()
-        if clean_words and clean_words[0] in STOP_COMMANDS and len(clean_words) <= 3:
-            return True, "стоп", True
+        # 1. Проверка быстрых стоп-команд («Джарвис, стоп», «замолчи», «тихо»)
+        for stop_w in STOP_WORDS:
+            if low == stop_w or re.search(rf"\b{re.escape(stop_w)}\b", low):
+                if any(w in low for w in WAKE_WORDS) or low in STOP_WORDS:
+                    return False, "", True
 
+        # 2. Точный поиск кодового слова «Джарвис» в любой части фразы
         for wake in WAKE_WORDS:
-            pattern = rf"\b{re.escape(wake)}\b[\s,.:;!\?-]*(.*)"
+            pattern = rf"\b{re.escape(wake)}\b[\s,!.:;-]*(.*)"
             match = re.search(pattern, clean, flags=re.IGNORECASE)
             if match:
-                command_part = match.group(1).strip()
+                command_part = match.group(1).strip(" .,!?-")
                 self.keep_alive()
-                return True, (command_part if command_part else "ты тут?"), False
+                return True, command_part, False
 
-        if self.is_session_active():
+        # 3. Нечеткое (Fuzzy) сравнение первого слова фразы, если Whisper слегка исказил «Джарвис»
+        tokens = clean.split(maxsplit=1)
+        if tokens and self._is_fuzzy_jarvis(tokens[0]):
+            command_part = tokens[1].strip(" .,!?-") if len(tokens) > 1 else ""
+            self.keep_alive()
+            return True, command_part, False
+
+        # 4. Если активно временное окно диалога (при active_window_sec > 0)
+        if self.active_window_sec > 0 and (time.time() - self.last_active_time) <= self.active_window_sec:
             self.keep_alive()
             return True, clean, False
 

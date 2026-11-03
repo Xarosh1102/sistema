@@ -151,10 +151,6 @@ def _check_internet_connected() -> bool:
 
 
 async def _startup_notifications(app: Application):
-    """
-    Если это обычный старт ноутбука — отправляет фото с веб-камеры и утреннюю сводку.
-    Если это быстрый самоперезапуск (--restarting) — присылает короткое подтверждение обновления.
-    """
     if not ADMIN_ID:
         return
 
@@ -162,7 +158,7 @@ async def _startup_notifications(app: Application):
         try:
             await app.bot.send_message(
                 chat_id=ADMIN_ID,
-                text="✅ **Система успешно перезапущена!** Все новые функции и данные активны.",
+                text="✅ **Джарвис успешно перезапущен, сэр!** Все системы и обновления активны.",
                 parse_mode="Markdown",
             )
         except Exception:
@@ -175,7 +171,7 @@ async def _startup_notifications(app: Application):
 
     briefing = await asyncio.to_thread(get_morning_briefing)
     caption = (
-        f"🟢 **Ноутбук включен!**\n"
+        f"🟢 **Джарвис в сети, сэр! Ноутбук включен.**\n"
         f"👁️ Снимок с веб-камеры при входе в систему.\n\n"
         f"{briefing}"
     )
@@ -193,7 +189,7 @@ async def _startup_notifications(app: Application):
         else:
             await app.bot.send_message(
                 chat_id=ADMIN_ID,
-                text=f"🟢 **Ноутбук включен!** (Веб-камера недоступна)\n\n{briefing}",
+                text=f"🟢 **Джарвис в сети, сэр!** (Веб-камера недоступна)\n\n{briefing}",
                 parse_mode="Markdown",
             )
     except Exception as e:
@@ -226,7 +222,7 @@ async def _system_monitor_loop(app: Application):
                 await app.bot.send_message(
                     chat_id=ADMIN_ID,
                     text=(
-                        f"📶 **Связь с Wi-Fi восстановлена!**\n"
+                        f"📶 **Сэр, связь с Wi-Fi восстановлена!**\n"
                         f"• Отключение было в: `{offline_since}`\n"
                         f"• Восстановлено в: `{restored_at}`"
                     ),
@@ -247,9 +243,9 @@ async def _system_monitor_loop(app: Application):
                     await app.bot.send_message(
                         chat_id=ADMIN_ID,
                         text=(
-                            f"🔥 **ВНИМАНИЕ: Перегрев системы!**\n"
+                            f"🔥 **СЭР, ВНИМАНИЕ: Перегрев системы!**\n"
                             f"• Датчик ({sensor_name}): **{temp:.1f}°C** (порог: 85°C)\n"
-                            f"Рекомендуется проверить охлаждение или закрыть тяжелые процессы через /processes."
+                            f"Рекомендую проверить охлаждение или закрыть тяжелые процессы через /processes."
                         ),
                         parse_mode="Markdown",
                     )
@@ -320,7 +316,7 @@ def _build_health_report_sync() -> str:
     top_lines = [f"  {i}. `{name.replace('`', '')}` — `{mb:.0f} MB`" for i, (name, mb) in enumerate(top3, 1)]
 
     report = [
-        "🩺 **Системный аудит здоровья ПК (`/health`):**\n",
+        "🩺 **Диагностика систем Джарвиса (`/health`):**\n",
         f"• **Нагрузка CPU:** `{cpu_usage:.1f}%`",
         f"• **Оперативная память (RAM):** `{ram_used_gb:.1f} / {ram_total_gb:.1f} GB` ({ram.percent}%)",
         f"• **Температура:** {temp_str}",
@@ -336,7 +332,7 @@ def _build_health_report_sync() -> str:
 async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         return
-    msg = await update.message.reply_text("🩺 Провожу диагностику системы...")
+    msg = await update.message.reply_text("🩺 Провожу полную диагностику систем, сэр...")
     try:
         report_text = await asyncio.to_thread(_build_health_report_sync)
         await msg.edit_text(report_text, parse_mode="Markdown")
@@ -365,12 +361,12 @@ async def listen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             duration = int(context.args[0])
         except ValueError:
-            await update.message.reply_text("⚠️ Укажи число секунд. Пример: `/listen` или `/listen 30`", parse_mode="Markdown")
+            await update.message.reply_text("⚠️ Укажите число секунд, сэр. Пример: `/listen` или `/listen 30`", parse_mode="Markdown")
             return
 
     duration = max(3, min(120, duration))
 
-    status_msg = await update.message.reply_text(f"🎙️ Записываю звук вокруг ноутбука ({duration} сек)...")
+    status_msg = await update.message.reply_text(f"🎙️ Записываю аудиоканал вокруг ноутбука ({duration} сек)...")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     wav_path = DATA_DIR / f"listen_{int(time.time())}.wav"
 
@@ -379,8 +375,8 @@ async def listen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(wav_path, "rb") as audio_f:
             await update.message.reply_audio(
                 audio=audio_f,
-                title=f"Запись с микрофона ({duration} сек)",
-                caption=f"👂 Аудиозапись с микрофона ноутбука ({duration} сек).",
+                title=f"Аудиозапись Джарвиса ({duration} сек)",
+                caption=f"👂 Запись с микрофона ноутбука ({duration} сек), сэр.",
             )
         await status_msg.delete()
     except Exception as e:
@@ -489,8 +485,8 @@ def _ask_gemini_vision_sync(img_path: Path, question: str, app_title: str) -> st
         return "API-ключ Gemini не настроен."
 
     prompt = (
-        f"На этом скриншоте изображено окно приложения «{app_title}». "
-        f"Ответь четко, кратко и по делу на вопрос пользователя: {question}"
+        f"Ты — Джарвис Тони Старка. На этом скриншоте изображено окно приложения «{app_title}». "
+        f"Ответь четко, кратко и вежливо (с обращением «сэр») на вопрос пользователя: {question}"
     )
 
     vision_models = [
@@ -513,7 +509,7 @@ def _ask_gemini_vision_sync(img_path: Path, question: str, app_title: str) -> st
             except Exception:
                 continue
 
-    return "Не удалось получить ответ от нейросети по скриншоту."
+    return "Не удалось получить ответ от нейросети по скриншоту, сэр."
 
 
 async def askscreen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -535,7 +531,7 @@ async def askscreen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     app_name = args[0]
     question = " ".join(args[1:])
 
-    status_msg = await update.message.reply_text(f"🔍 Ищу окно «{app_name}» и анализирую экран...")
+    status_msg = await update.message.reply_text(f"🔍 Ищу окно «{app_name}» и анализирую экран, сэр...")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     shot_path = DATA_DIR / f"askscreen_{int(time.time())}.png"
 
@@ -553,7 +549,7 @@ async def askscreen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=(
                     f"🪟 **Окно:** `{title_or_err}`\n"
                     f"❓ **Вопрос:** {question}\n\n"
-                    f"🤖 **Ответ Системы:**\n{answer}"
+                    f"🤖 **Ответ Джарвиса:**\n{answer}"
                 )[:1024],
                 parse_mode="Markdown",
             )
@@ -586,7 +582,7 @@ async def voice_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         recognized_text = await asyncio.to_thread(_stt_instance.transcribe_file, ogg_path)
         if not recognized_text:
-            await update.message.reply_text("⚠️ Не удалось расслышать речь в голосовом сообщении.")
+            await update.message.reply_text("⚠️ Не удалось расслышать речь в голосовом сообщении, сэр.")
             return
 
         print(f"[Telegram Голос] Распознано: {recognized_text}")
@@ -594,10 +590,10 @@ async def voice_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         if _agent_instance is not None:
             reply = await asyncio.to_thread(_agent_instance.process_command, recognized_text)
         else:
-            reply = "Ядро агента не подключено."
+            reply = "Ядро Джарвиса не подключено."
 
         await update.message.reply_text(
-            f"🗣 **Распознано:** _{recognized_text}_\n\n🤖 **Ответ:**\n{reply}",
+            f"🗣 **Распознано:** _{recognized_text}_\n\n🤖 **Джарвис:**\n{reply}",
             parse_mode="Markdown",
         )
     except Exception as e:
@@ -616,15 +612,15 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "🤖 **Система на связи!**\n\n"
+        "🤖 **Джарвис к вашим услугам, сэр!**\n\n"
         "**Макросы:**\n"
         "• /coding — Запустить макрос «Режим кодинга»\n"
         "• /chill — Запустить макрос «Отдыхаем»\n\n"
         "**Команды:**\n"
-        "• /restart — Перезапустить ассистента «Система» (обновить код и данные)\n"
+        "• /restart — Перезапустить Джарвиса (обновить код и данные)\n"
         "• /health — Полный аудит здоровья ПК (температура, диски, RAM, батарея)\n"
         "• /listen `[сек]` — Записать звук с микрофона ПК (по умолчанию 10 сек)\n"
-        "• /askscreen `[приложение] [вопрос]` — Скриншот окна и ответ ИИ\n"
+        "• /askscreen `[приложение] [вопрос]` — Скриншот окна и ответ Джарвиса\n"
         "• /screen — Скриншот всего экрана\n"
         "• /webcam — Фото с веб-камеры\n"
         "• /processes — Мониторинг и закрытие процессов\n"
@@ -638,7 +634,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /autorun — Проверить автозагрузку Windows\n"
         "• /lock — Заблокировать ПК (Win+L)\n"
         "• /shutdown — Выключить или перезагрузить ПК\n\n"
-        "🎙 *Ты также можешь отправлять голосовые сообщения или писать команды текстом («Система, перезапуск системы», «открой ватсап»)!*",
+        "🎙 *Вы также можете отправлять голосовые сообщения или писать команды текстом («Джарвис, открой ватсап», «Джарвис, сверни все окна»)!*",
         parse_mode="Markdown"
     )
 
@@ -646,7 +642,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def coding_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         return
-    await update.message.reply_text("⚡ Запускаю сценарий «Режим кодинга»...")
+    await update.message.reply_text("⚡ Запускаю протокол «Режим кодинга», сэр...")
     res = await asyncio.to_thread(run_macro, "режим кодинга")
     await update.message.reply_text(f"✅ {res}")
 
@@ -654,7 +650,7 @@ async def coding_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def chill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         return
-    await update.message.reply_text("🍿 Запускаю сценарий «Отдыхаем»...")
+    await update.message.reply_text("🍿 Запускаю протокол «Отдыхаем», сэр...")
     res = await asyncio.to_thread(run_macro, "отдыхаем")
     await update.message.reply_text(f"✅ {res}")
 
@@ -669,7 +665,7 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         screenshot = await asyncio.to_thread(ImageGrab.grab)
         screenshot.save(shot_path)
         with open(shot_path, "rb") as photo:
-            await update.message.reply_photo(photo=photo, caption="📸 Текущий экран ПК")
+            await update.message.reply_photo(photo=photo, caption="📸 Текущий экран ПК, сэр")
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка скриншота: {e}")
     finally:
@@ -716,7 +712,7 @@ async def webcam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         with open(cam_path, "rb") as photo:
-            await update.message.reply_photo(photo=photo, caption="👁️ Фото с веб-камеры ноутбука:")
+            await update.message.reply_photo(photo=photo, caption="👁️ Снимок с веб-камеры ноутбука, сэр:")
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка при работе с веб-камерой: {e}")
     finally:
@@ -775,7 +771,7 @@ async def process_callback_handler(update: Update, context: ContextTypes.DEFAULT
             proc_name = p.name().replace("`", "")
             p.kill()
             await query.edit_message_text(
-                text=f"✅ Процесс `{proc_name}` (PID: {pid}) успешно завершен.",
+                text=f"✅ Процесс `{proc_name}` (PID: {pid}) завершен, сэр.",
                 parse_mode="Markdown"
             )
         except psutil.NoSuchProcess:
@@ -812,14 +808,14 @@ async def process_callback_handler(update: Update, context: ContextTypes.DEFAULT
         action = data.split("_")[1]
         try:
             if action == "shutdown":
-                await query.edit_message_text(text="🛑 Выключаю компьютер через 10 секунд...")
+                await query.edit_message_text(text="🛑 Выключаю компьютер через 10 секунд, сэр...")
                 subprocess.Popen("shutdown /s /t 10", shell=True)
             elif action == "reboot":
-                await query.edit_message_text(text="🔄 Перезагружаю компьютер через 10 секунд...")
+                await query.edit_message_text(text="🔄 Перезагружаю компьютер через 10 секунд, сэр...")
                 subprocess.Popen("shutdown /r /t 10", shell=True)
             elif action == "cancel":
                 subprocess.Popen("shutdown /a", shell=True)
-                await query.edit_message_text(text="✅ Таймер выключения/перезагрузки отменен.")
+                await query.edit_message_text(text="✅ Таймер выключения/перезагрузки отменен, сэр.")
         except Exception as e:
             await query.edit_message_text(text=f"❌ Ошибка питания: {e}")
 
@@ -851,7 +847,7 @@ async def battery_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         temp_str = f"\n🌡️ Температура ({sensor_name}): **{temp:.1f}°C**" if temp > 0 else ""
 
         text = (
-            f"🔋 **Состояние системы:**\n\n"
+            f"🔋 **Состояние питания и охлаждения:**\n\n"
             f"• Заряд: **{percent}%**\n"
             f"• Статус: {status}"
             f"{time_str}{temp_str}"
@@ -870,14 +866,14 @@ async def clip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_to_copy = " ".join(args)
         try:
             pyperclip.copy(text_to_copy)
-            await update.message.reply_text(f"📋 Скопировано в буфер обмена ПК:\n{text_to_copy}")
+            await update.message.reply_text(f"📋 Скопировано в буфер обмена ПК, сэр:\n{text_to_copy}")
         except Exception as e:
             await update.message.reply_text(f"❌ Ошибка буфера обмена: {e}")
     else:
         try:
             current_clipboard = pyperclip.paste()
             if not current_clipboard or not current_clipboard.strip():
-                await update.message.reply_text("📋 Буфер обмена ноутбука пуст.")
+                await update.message.reply_text("📋 Буфер обмена ноутбука пуст, сэр.")
             else:
                 display_text = (
                     current_clipboard
@@ -895,7 +891,7 @@ async def get_file_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     args = context.args
     if not args:
-        await update.message.reply_text("⚠️ Укажи имя файла. Пример:\n`/get отчет.pdf`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Укажите имя файла, сэр. Пример:\n`/get отчет.pdf`", parse_mode="Markdown")
         return
 
     filename = " ".join(args)
@@ -926,7 +922,7 @@ async def get_file_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
 
     if not target_file:
-        await update.message.reply_text(f"❌ Файл «{filename}» не найден.")
+        await update.message.reply_text(f"❌ Файл «{filename}» не найден, сэр.")
         return
 
     try:
@@ -952,7 +948,7 @@ async def receive_file_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         save_path = downloads_dir / document.file_name
         await file_obj.download_to_drive(custom_path=str(save_path))
 
-        await update.message.reply_text(f"📥 Файл сохранен на ноутбуке!\nПуть: {save_path}")
+        await update.message.reply_text(f"📥 Файл сохранен на ноутбуке, сэр!\nПуть: {save_path}")
     except Exception as e:
         await update.message.reply_text(f"❌ Не удалось сохранить файл: {e}")
 
@@ -963,7 +959,7 @@ async def open_app_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     args = context.args
     if not args:
-        await update.message.reply_text("⚠️ Укажи название программы. Пример:\n`/open ватсап`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Укажите название программы, сэр. Пример:\n`/open ватсап`", parse_mode="Markdown")
         return
 
     app_name = " ".join(args).strip()
@@ -980,7 +976,7 @@ async def site_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     args = context.args
     if not args:
-        await update.message.reply_text("⚠️ Укажи ссылку. Пример:\n`/site https://youtube.com`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Укажите ссылку, сэр. Пример:\n`/site https://youtube.com`", parse_mode="Markdown")
         return
 
     url = " ".join(args).strip()
@@ -990,7 +986,7 @@ async def site_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         webbrowser.open(url)
         maximize_window_by_hint("chrome", timeout=2.5)
-        await update.message.reply_text(f"🌐 Ссылка открыта во весь экран:\n{url}")
+        await update.message.reply_text(f"🌐 Ссылка открыта во весь экран, сэр:\n{url}")
     except Exception as e:
         await update.message.reply_text(f"❌ Не удалось открыть ссылку: {e}")
 
@@ -1032,7 +1028,7 @@ async def shutdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ]
     await update.message.reply_text(
-        "⚠️ **Вы действительно хотите выключить или перезагрузить компьютер?**",
+        "⚠️ **Сэр, вы действительно хотите выключить или перезагрузить компьютер?**",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
@@ -1072,11 +1068,11 @@ async def clean_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         return
 
-    msg = await update.message.reply_text("🧹 Очищаю временные файлы...")
+    msg = await update.message.reply_text("🧹 Очищаю временные файлы, сэр...")
     try:
         deleted_files, freed_mb = await asyncio.to_thread(_clean_temp_sync)
         await msg.edit_text(
-            f"🧹 **Очистка системы завершена!**\n\n"
+            f"🧹 **Очистка системы завершена, сэр!**\n\n"
             f"• Удалено файлов: `{deleted_files}`\n"
             f"• Освобождено места: `{freed_mb:.2f} MB`",
             parse_mode="Markdown"
@@ -1101,7 +1097,7 @@ async def autorun_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         create_silent_launchers()
 
         await update.message.reply_text(
-            "🚀 **Автозагрузка настроена!** Работает единый фоновый лаунчер без дубликатов.",
+            "🚀 **Автозагрузка проверена, сэр!** Работает единый фоновый лаунчер Джарвиса.",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -1114,7 +1110,7 @@ async def lock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         ctypes.windll.user32.LockWorkStation()
-        await update.message.reply_text("🔒 Компьютер заблокирован.")
+        await update.message.reply_text("🔒 Рабочая станция заблокирована, сэр.")
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка блокировки: {e}")
 
@@ -1138,7 +1134,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     thinking_config=types.ThinkingConfig(thinking_budget=0),
                 ),
             )
-            reply = (response.text or "Готово.").replace("*", "").replace("#", "").strip()
+            reply = (response.text or "Выполнено, сэр.").replace("*", "").replace("#", "").strip()
 
         await update.message.reply_text(reply)
     except Exception as e:
@@ -1184,7 +1180,7 @@ def run_telegram_bot(agent=None, stt=None):
         app.add_handler(MessageHandler(filters.VOICE | filters.VIDEO_NOTE | filters.AUDIO, voice_message_handler))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
-        print("[Telegram] Бот подключен и готов к работе!")
+        print("[Telegram] Канал связи Джарвиса подключен и готов к работе!")
         app.run_polling(drop_pending_updates=True, stop_signals=None)
     except Exception as e:
         print(f"[Telegram] Критическая ошибка запуска бота: {e}")

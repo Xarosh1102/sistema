@@ -101,13 +101,13 @@ def launch_app_universal(app_name: str) -> tuple[bool, str]:
     clean = (app_name or "").strip().lower()
     clean = re.sub(r"\b(приложение|программу|программа|окно|быстро|пожалуйста)\b", "", clean).strip()
     if not clean:
-        return False, "Не указано название приложения."
+        return False, "Не указано название приложения, сэр."
 
     # 1. WhatsApp
     if any(w in clean for w in ("whatsapp", "ватсап", "вацап", "ватсапп")):
         subprocess.Popen("start shell:AppsFolder\\5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App", shell=True)
         maximize_window_by_hint("whatsapp", timeout=3.5)
-        return True, "Открываю WhatsApp во весь экран."
+        return True, "Открываю WhatsApp во весь экран, сэр."
 
     # 2. Telegram
     if any(w in clean for w in ("telegram", "телеграм", "телегу", "тг")):
@@ -124,13 +124,13 @@ def launch_app_universal(app_name: str) -> tuple[bool, str]:
         if not launched:
             subprocess.Popen("start tg:", shell=True)
         maximize_window_by_hint("telegram", timeout=3.5)
-        return True, "Открываю Telegram во весь экран."
+        return True, "Открываю Telegram во весь экран, сэр."
 
     # 3. Chrome
     if any(w in clean for w in ("chrome", "хром", "браузер")):
         subprocess.Popen("start chrome --start-maximized", shell=True)
         maximize_window_by_hint("chrome", timeout=2.5)
-        return True, "Открываю Google Chrome во весь экран."
+        return True, "Открываю Google Chrome во весь экран, сэр."
 
     # 4. Стандартные программы
     shortcuts = {
@@ -152,9 +152,9 @@ def launch_app_universal(app_name: str) -> tuple[bool, str]:
         if clean == key or key in clean:
             subprocess.Popen(f"start /max {cmd}", shell=True)
             maximize_window_by_hint(key, timeout=3.0)
-            return True, f"Запускаю {app_name} во весь экран."
+            return True, f"Запускаю {app_name} во весь экран, сэр."
 
-    # 5. Поиск ярлыков
+    # 5. Поиск ярлыков на Рабочем столе и в меню «Пуск»
     search_folders = [
         Path.home() / "Desktop",
         Path.home() / "OneDrive" / "Desktop",
@@ -171,11 +171,11 @@ def launch_app_universal(app_name: str) -> tuple[bool, str]:
                 if clean in item.stem.lower():
                     os.startfile(str(item))
                     maximize_window_by_hint(item.stem, timeout=3.5)
-                    return True, f"Запускаю {item.stem} во весь экран."
+                    return True, f"Запускаю {item.stem} во весь экран, сэр."
 
     subprocess.Popen(f'start /max "" "{clean}"', shell=True)
     maximize_window_by_hint(clean, timeout=3.0)
-    return True, f"Запускаю {app_name} во весь экран."
+    return True, f"Запускаю {app_name} во весь экран, сэр."
 
 
 @register_tool
@@ -235,7 +235,7 @@ def close_all_applications() -> str:
     for exe in ("Taskmgr.exe", "WindowsTerminal.exe", "Telegram.exe", "WhatsApp.exe", "chrome.exe", "Code.exe"):
         subprocess.run(f"taskkill /F /IM {exe} /T", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=no_win)
 
-    return "Все открытые приложения закрыты."
+    return "Все открытые приложения закрыты, сэр."
 
 
 @register_tool
@@ -314,15 +314,37 @@ def close_application(app_name: str) -> str:
     user32.EnumWindows(WNDENUMPROC(enum_cb), 0)
 
     if killed_count > 0:
-        return f"Приложение «{app_name.strip()}» закрыто."
-    return f"Запущенное приложение «{app_name.strip()}» не найдено."
+        return f"Приложение «{app_name.strip()}» закрыто, сэр."
+    return f"Запущенное приложение «{app_name.strip()}» не найдено, сэр."
+
+
+@register_tool
+def shutdown_computer() -> str:
+    """Выключает компьютер (ноутбук) через завершение работы Windows с таймером 10 секунд."""
+    no_win = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    subprocess.Popen("shutdown /s /t 10", shell=True, creationflags=no_win)
+    return "Выполняю завершение работы компьютера, сэр. Отключение через 10 секунд."
+
+
+@register_tool
+def reboot_computer() -> str:
+    """Перезапускает (перезагружает) компьютер (Windows) с таймером 10 секунд."""
+    no_win = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    subprocess.Popen("shutdown /r /t 10", shell=True, creationflags=no_win)
+    return "Выполняю перезагрузку компьютера, сэр. Перезапуск через 10 секунд."
+
+
+@register_tool
+def cancel_shutdown() -> str:
+    """Отменяет запланированное выключение или перезагрузку компьютера."""
+    no_win = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    subprocess.Popen("shutdown /a", shell=True, creationflags=no_win)
+    return "Выключение или перезагрузка компьютера отменены, сэр."
 
 
 @register_tool
 def restart_assistant_system() -> str:
-    """
-    Перезапускает сам голосовой ассистент «Система» и Telegram-бота для применения нового кода, настроек и данных.
-    """
+    """Перезапускает сам голосовой ассистент «Джарвис» и Telegram-бота для применения нового кода."""
     def _delayed_restart():
         time.sleep(2.0)
 
@@ -348,7 +370,7 @@ def restart_assistant_system() -> str:
         os._exit(0)
 
     threading.Thread(target=_delayed_restart, daemon=True).start()
-    return "Выполняю перезапуск системы. Обновляю код и настройки, вернусь через пару секунд."
+    return "Выполняю перезапуск системы Джарвиса, сэр. Вернусь через пару секунд."
 
 
 @register_tool
@@ -365,28 +387,32 @@ def adjust_system_volume(level_percent: int) -> str:
         volume = cast(interface, POINTER(IAudioEndpointVolume))
         volume.SetMute(0, None)
         volume.SetMasterVolumeLevelScalar(target / 100.0, None)
-        return f"Громкость установлена на {target} процентов."
+        return f"Громкость установлена на {target} процентов, сэр."
     except Exception:
         for _ in range(50):
             pyautogui.press("volumedown")
         for _ in range(round(target / 2)):
             pyautogui.press("volumeup")
-        return f"Громкость выставлена на {target} процентов."
+        return f"Громкость выставлена на {target} процентов, сэр."
 
 
 @register_tool
 def minimize_all_windows() -> str:
-    """Сворачивает все открытые окна на рабочий стол напрямую через WinAPI (не зависит от раскладки клавиатуры)."""
+    """
+    Сворачивает все открытые окна на рабочий стол через аппаратные виртуальные коды клавиш Win + D.
+    Работает безотказно на Windows 11 независимо от текущей раскладки клавиатуры (РУС/ENG).
+    """
     user32 = ctypes.windll.user32
-    tray_hwnd = user32.FindWindowW("Shell_TrayWnd", None)
-    if tray_hwnd:
-        user32.SendMessageW(tray_hwnd, 0x0111, 419, 0)  # WM_COMMAND = 0x0111, MIN_ALL = 419
-    else:
-        user32.keybd_event(0x5B, 0, 0, 0)
-        user32.keybd_event(0x44, 0, 0, 0)
-        user32.keybd_event(0x44, 0, 2, 0)
-        user32.keybd_event(0x5B, 0, 2, 0)
-    return "Все окна свернуты."
+    VK_LWIN = 0x5B
+    VK_D = 0x44
+    KEYEVENTF_KEYUP = 0x0002
+
+    user32.keybd_event(VK_LWIN, 0, 0, 0)
+    user32.keybd_event(VK_D, 0, 0, 0)
+    time.sleep(0.05)
+    user32.keybd_event(VK_D, 0, KEYEVENTF_KEYUP, 0)
+    user32.keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0)
+    return "Все окна свернуты, сэр."
 
 
 @register_tool
@@ -397,11 +423,11 @@ def open_website(url: str) -> str:
         clean_url = "https://" + clean_url
     webbrowser.open(clean_url)
     maximize_window_by_hint("chrome", timeout=2.5)
-    return f"Открываю сайт {clean_url}."
+    return f"Открываю сайт во весь экран, сэр: {clean_url}"
 
 
 @register_tool
 def lock_workstation() -> str:
     """Блокирует экран компьютера (Win + L)."""
     ctypes.windll.user32.LockWorkStation()
-    return "Компьютер заблокирован."
+    return "Рабочая станция заблокирована, сэр."
